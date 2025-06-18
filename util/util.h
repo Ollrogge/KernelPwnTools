@@ -39,5 +39,3 @@ int ulimit_fd(void);
 void save_state(void);
 
 void unshare_setup(uid_t uid, gid_t gid);
-
-void shell_modprobe(void);
