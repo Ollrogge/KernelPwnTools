@@ -1,0 +1,1 @@
+gcc -I../../ -o poc poc.c shm_race.c -lpthread
