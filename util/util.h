@@ -9,6 +9,30 @@
 
 extern uint64_t user_cs,user_ss,user_sp,user_rflags;
 
+typedef struct {
+    ulong r15;
+    ulong r14;
+    ulong r13;
+    ulong r12;
+    ulong bp;
+    ulong bx;
+    ulong r11;
+    ulong r10;
+    ulong r9;
+    ulong r8;
+    ulong ax;
+    ulong cx;
+    ulong dx;
+    ulong si;
+    ulong di;
+    ulong orig_ax;
+    ulong ip;
+    ulong cs;
+    ulong flags;
+    ulong sp;
+    ulong ss;
+} pt_regs_t;
+
 #define WAIT(void) {getc(stdin); fflush(stdin);}
 #define errExit(msg) do { perror(msg); exit(EXIT_FAILURE);} while (0)
 #define fail(msg) do {error(msg); exit(EXIT_FAILURE);} while (0)
@@ -39,3 +63,5 @@ int ulimit_fd(void);
 void save_state(void);
 
 void unshare_setup(uid_t uid, gid_t gid);
+
+void print_regs(pt_regs_t* regs);
