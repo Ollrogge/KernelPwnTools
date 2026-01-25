@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <poll.h>
+#include <stdbool.h>
 
 #define POLL_LIST_SZ 0x10
 #define POLL_FD_SZ 0x8
@@ -8,13 +9,13 @@
 #define POLLFD_PER_PAGE  ((PAGE_SZ-sizeof(struct poll_list)) / sizeof(struct pollfd))
 #define STACK_PPS_SZ 0x100
 
-extern int pipes[0x1000][0x02];
-extern int qids[0x1000];
-extern int keys[0x1000];
-extern int seq_ops[0x10000];
-extern int ptmx[0x1000];
-extern int fds[0x1000];
-extern int n_keys;
+extern int g_pipes[0x1000][0x02];
+extern int g_qids[0x1000];
+extern int g_keys[0x1000];
+extern int g_seq_ops[0x10000];
+extern int g_ptmx[0x1000];
+extern int g_fds[0x1000];
+extern int g_n_keys;
 
 typedef struct msg_msg_seg msg_msg_seg_t;
 struct msg_msg_seg {
@@ -56,6 +57,20 @@ typedef struct {
     bool suspend;
 } thread_args_t;
 
+struct rb_node {
+	unsigned long  __rb_parent_color;
+	struct rb_node *rb_right;
+	struct rb_node *rb_left;
+} __attribute__((aligned(sizeof(long))));
+
+// elastic object, cant control the first 40 bytes of the spray due to metadata
+struct simple_xattr {
+	struct rb_node rb_node;
+	char *name;
+	size_t size;
+	char value[];
+};
+
 void alloc_tty(int i);
 void free_tty(int i);
 
@@ -65,8 +80,9 @@ void release_pipe_buf(int i);
 
 // user_key_payload
 long free_key(key_serial_t key);
-int get_key(int i, char* buf, size_t sz);
+long get_key(int i, char* buf, size_t sz);
 void alloc_key(int id, char *buf, size_t size);
+long dealloc_key(int id);
 
 // msg_msg
 void alloc_qid(int i);
@@ -78,3 +94,8 @@ long recv_msg(int qid, void* data, int size, long type, bool copy);
 int create_timer(bool leak);
 
 void init_fd(int i);
+
+// xattr
+int alloc_simple_xattr(char *path, int id, char *data, size_t size, bool edit);
+int remove_simple_xattr(char *path, int id);
+

