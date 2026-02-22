@@ -65,3 +65,5 @@ void save_state(void);
 void unshare_setup(uid_t uid, gid_t gid);
 
 void print_regs(pt_regs_t* regs);
+
+uint64_t stext_phys_leak_pte();

