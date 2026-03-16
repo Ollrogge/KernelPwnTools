@@ -1,2 +1,2 @@
 # KernelPwnTools
-Files with functonality for kernel exploitation
+Helper scripts and files that I use for linux kernel exploitation.
