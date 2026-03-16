@@ -39,8 +39,8 @@ void error(const char *format, ...) {
 void hexdump(void *buf, size_t len) {
     uint64_t *tmp = (uint64_t *)buf;
 
-    for (int i = 0; i < (len / 8); i++) {
-        printf("%d: %p ", i, tmp[i]);
+    for (size_t i = 0; i < (len / 8); i++) {
+        printf("%lu: %p ", i, (void *)tmp[i]);
         if ((i + 1) % 2 == 0) {
             printf("\n");
         }

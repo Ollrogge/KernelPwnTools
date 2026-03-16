@@ -122,7 +122,7 @@ void alloc_key(int id, char *buf, size_t size) {
     g_keys[id] = key;
 }
 
-long dealloc_key(int id) { free_key(g_keys[id]); }
+long dealloc_key(int id) { return free_key(g_keys[id]); }
 
 void alloc_qid(int i) {
     g_qids[i] = msgget(IPC_PRIVATE, 0666 | IPC_CREAT);
