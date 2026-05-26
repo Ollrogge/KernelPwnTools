@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <sched.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -38,14 +39,11 @@ typedef struct {
         getc(stdin);                                                           \
         fflush(stdin);                                                         \
     }
-#define errExit(msg)                                                           \
+
+#define errExit(fmt, ...)                                                      \
     do {                                                                       \
-        perror(msg);                                                           \
-        exit(EXIT_FAILURE);                                                    \
-    } while (0)
-#define fail(msg)                                                              \
-    do {                                                                       \
-        error(msg);                                                            \
+        int saved_errno = errno;                                               \
+        fprintf(stderr, fmt ": %s\n", ##__VA_ARGS__, strerror(saved_errno));   \
         exit(EXIT_FAILURE);                                                    \
     } while (0)
 
