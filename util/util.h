@@ -89,7 +89,11 @@ void unshare_setup(uid_t uid, gid_t gid);
 void print_regs(pt_regs_t *regs);
 
 void evict_tlb(void);
+void evict_tlb2(void);
 
 uint64_t stext_phys_leak_pte();
 
 void spray_unix_control(void *data, size_t len);
+
+bool is_writable(void *addr);
+void install_fault_handler(void);
