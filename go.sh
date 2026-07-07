@@ -1,5 +1,8 @@
 #!/bin/bash
-#
-./build.sh
-./create_cpio.sh
+
+set -e
+sudo ./build.sh
+sudo ./create_cpio.sh
+cd ../
 ./run.sh
+cd -
