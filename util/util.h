@@ -1,3 +1,6 @@
+#ifndef UTIL_H_
+#define UTIL_H_
+
 #include <errno.h>
 #include <sched.h>
 #include <stdbool.h>
@@ -34,11 +37,12 @@ typedef struct {
     ulong ss;
 } pt_regs_t;
 
-#define WAIT(void)                                                             \
-    {                                                                          \
-        getc(stdin);                                                           \
-        fflush(stdin);                                                         \
-    }
+#define WAIT()                                                                 \
+    do {                                                                       \
+        int c;                                                                 \
+        while ((c = getchar()) != '\n' && c != EOF) {                          \
+        }                                                                      \
+    } while (0)
 
 #define errExit(fmt, ...)                                                      \
     do {                                                                       \
@@ -58,9 +62,9 @@ typedef struct {
 #define _pmd_index_to_virt(i) (i << 21)
 #define _pud_index_to_virt(i) (i << 30)
 #define _pgd_index_to_virt(i) (i << 39)
-#define PTI_TO_VIRT(pud_index, pmd_index, pte_index, page_index)               \
-    ((void *)(_pgd_index_to_virt((uint64_t)(pud_index)) +                      \
-              _pud_index_to_virt((uint64_t)(pmd_index)) +                      \
+#define PTI_TO_VIRT(pdp_index, pd_index, pte_index, page_index)                \
+    ((void *)(_pgd_index_to_virt((uint64_t)(pdp_index)) +                      \
+              _pud_index_to_virt((uint64_t)(pd_index)) +                       \
               _pmd_index_to_virt((uint64_t)(pte_index)) +                      \
               _pte_index_to_virt((uint64_t)(page_index))))
 
@@ -97,3 +101,5 @@ void spray_unix_control(void *data, size_t len);
 
 bool is_writable(void *addr);
 void install_fault_handler(void);
+
+#endif
